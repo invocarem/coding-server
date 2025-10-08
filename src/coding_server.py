@@ -21,8 +21,25 @@ logging.basicConfig(
     ]
 )
 
-from code_processor import format_prompt_for_array_comments, clean_model_output
-from ollama_client import call_ollama_smart, check_ollama_availability
+from code_processor import format_prompt_for_array_comments, format_prompt_for_remove_all_comments, clean_model_output, clean_removed_comments_output
+
+from ollama_client import (
+    call_ollama_smart, 
+    check_ollama_availability, 
+    create_ollama_session,
+    get_available_models,
+    get_available_models_cli,
+    IS_REMOTE,
+    OLLAMA_BASE_URL,
+    OLLAMA_AVAILABLE
+)
+from liturgical_processor import renumber_verses_with_ai
+from liturgical_processor import (
+    parse_verses_from_array, 
+    analyze_verse_structure_with_ai,
+    adjust_verses_to_count
+)
+
 from latin_morphology import analyze_latin_word
 
 load_dotenv()
@@ -34,174 +51,9 @@ app = Flask(__name__)
 CORS(app)
 
 # Configuration
-OLLAMA_BASE_URL = os.getenv('OLLAMA_URL', 'http://localhost:11434')
-OLLAMA_USERNAME = os.getenv('OLLAMA_USERNAME')
-OLLAMA_PASSWORD = os.getenv('OLLAMA_PASSWORD')
 PORT = int(os.getenv('PORT', 5000))
 DEFAULT_MODEL = os.getenv('DEFAULT_MODEL', 'deepseek-coder:6.7b')
 
-# Track Ollama availability
-OLLAMA_AVAILABLE = False
-LAST_OLLAMA_CHECK = 0
-IS_REMOTE = False
-
-def is_remote_url(url):
-    """Check if the Ollama URL is remote"""
-    parsed = urlparse(url)
-    local_hosts = ['localhost', '127.0.0.1', '0.0.0.0']
-    return parsed.hostname not in local_hosts
-
-def create_ollama_session():
-    """Create requests session with authentication if needed"""
-    session = requests.Session()
-    
-    # Add basic auth if credentials provided
-    if OLLAMA_USERNAME and OLLAMA_PASSWORD:
-        session.auth = (OLLAMA_USERNAME, OLLAMA_PASSWORD)
-    
-    # Add timeout and retry configuration
-    session.timeout = 30
-    
-    return session
-
-def check_ollama_availability():
-    """Check if Ollama is available (local or remote)"""
-    global OLLAMA_AVAILABLE, LAST_OLLAMA_CHECK, IS_REMOTE
-    
-    # Cache check for 30 seconds
-    if time.time() - LAST_OLLAMA_CHECK < 30:
-        return OLLAMA_AVAILABLE
-    
-    IS_REMOTE = is_remote_url(OLLAMA_BASE_URL)
-    
-    try:
-        session = create_ollama_session()
-        response = session.get(f"{OLLAMA_BASE_URL}/api/tags", timeout=5)
-        OLLAMA_AVAILABLE = response.status_code == 200
-        
-        if OLLAMA_AVAILABLE and IS_REMOTE:
-            print(f"✅ Connected to remote Ollama server: {OLLAMA_BASE_URL}")
-        elif OLLAMA_AVAILABLE:
-            print("✅ Connected to local Ollama server")
-        else:
-            print(f"❌ Ollama server not responding: {response.status_code}")
-            
-    except requests.exceptions.ConnectionError:
-        OLLAMA_AVAILABLE = False
-        if IS_REMOTE:
-            print(f"❌ Cannot connect to remote Ollama server: {OLLAMA_BASE_URL}")
-        else:
-            print("❌ Cannot connect to local Ollama server - is it running?")
-    except requests.exceptions.Timeout:
-        OLLAMA_AVAILABLE = False
-        print("❌ Ollama server timeout")
-    except Exception as e:
-        OLLAMA_AVAILABLE = False
-        print(f"❌ Error connecting to Ollama: {e}")
-    
-    LAST_OLLAMA_CHECK = time.time()
-    return OLLAMA_AVAILABLE
-
-def call_ollama_http(model_name, prompt):
-    """Call Ollama using HTTP API with remote support"""
-    try:
-        session = create_ollama_session()
-        
-        response = session.post(
-            f"{OLLAMA_BASE_URL}/api/generate",
-            json={
-                "model": model_name,
-                "prompt": prompt,
-                "stream": False,
-                "options": {
-                    "temperature": 0.1,
-                    "top_p": 0.9,
-                    "top_k": 40
-                }
-            },
-            timeout=45
-        )
-        
-        if response.status_code == 200:
-            return response.json().get("response", "").strip()
-        elif response.status_code == 401:
-            return "Error: Authentication failed - check OLLAMA_USERNAME and OLLAMA_PASSWORD"
-        elif response.status_code == 404:
-            return f"Error: Model '{model_name}' not found on remote server"
-        else:
-            return f"Error: HTTP {response.status_code} - {response.text}"
-            
-    except requests.exceptions.Timeout:
-        return "Error: Request timeout - remote server took too long to respond"
-    except requests.exceptions.ConnectionError:
-        return f"Error: Cannot connect to Ollama server at {OLLAMA_BASE_URL}"
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-def call_ollama_cli(model_name, prompt):
-    """Call Ollama using CLI - only for local Ollama"""
-    if IS_REMOTE:
-        return "Error: CLI mode not available for remote Ollama servers"
-    
-    try:
-        result = subprocess.run(
-            ['ollama', 'run', model_name],
-            input=prompt,
-            text=True,
-            capture_output=True,
-            timeout=45
-        )
-        
-        if result.returncode == 0:
-            return result.stdout.strip()
-        else:
-            error_msg = result.stderr.strip()
-            if "file does not exist" in error_msg:
-                return f"Error: Model '{model_name}' not found. Available models: {get_available_models_cli()}"
-            return f"Error: {error_msg}"
-            
-    except subprocess.TimeoutExpired:
-        return "Error: Request timeout - Ollama took too long to respond"
-    except FileNotFoundError:
-        return "Error: Ollama not installed or not in PATH"
-    except Exception as e:
-        return f"Error: {str(e)}"
-
-def get_available_models_cli():
-    """Get available models via CLI fallback"""
-    try:
-        result = subprocess.run(
-            ['ollama', 'list'],
-            capture_output=True,
-            text=True,
-            timeout=10
-        )
-        if result.returncode == 0:
-            lines = result.stdout.strip().split('\n')[1:]
-            models = [line.split()[0] for line in lines if line.strip()]
-            return models
-    except:
-        pass
-    return []
-
-def call_ollama_smart(model_name, prompt):
-    """
-    Smart Ollama caller that handles both local and remote servers
-    """
-    # For remote servers, only use HTTP
-    if IS_REMOTE:
-        return call_ollama_http(model_name, prompt)
-    
-    # For local servers, try HTTP first, then CLI fallback
-    if check_ollama_availability():
-        result = call_ollama_http(model_name, prompt)
-        if not result.startswith("Error:"):
-            return result
-        # If HTTP fails, try CLI
-        return call_ollama_cli(model_name, prompt)
-    else:
-        # Ollama not available via HTTP, try CLI
-        return call_ollama_cli(model_name, prompt)
 
 def count_array_elements(code):
     """Count the number of array elements with comments"""
@@ -240,7 +92,8 @@ def validate_corrected_code(original, corrected):
 # Health check endpoint
 @app.route('/health', methods=['GET'])
 def health_check():
-    ollama_status = "connected" if check_ollama_availability() else "disconnected"
+    is_available = check_ollama_availability()
+    ollama_status = "connected" if is_available else "disconnected"
     server_type = "remote" if IS_REMOTE else "local"
     
     return jsonify({
@@ -319,6 +172,50 @@ def fix_array_comments():
             "model_used": model,
             "language": language,
             "elements_count": elements_count,
+            "success": True
+        })
+
+    except Exception as e:
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
+
+# Remove all comments endpoint
+@app.route('/api/remove-all-comments', methods=['POST'])
+def remove_all_comments():
+    """Remove all comments from code using Ollama"""
+    try:
+        data = request.get_json()
+
+        if not data or 'code' not in data:
+            return jsonify({"error": "No code provided"}), 400
+
+        code = data['code'].strip()
+        language = data.get('language', 'swift')
+        model = data.get('model', DEFAULT_MODEL)
+        
+        if not code:
+            return jsonify({"error": "Empty code provided"}), 400
+
+        prompt = format_prompt_for_remove_all_comments(code, language)
+        
+        # Use smart caller (HTTP first, CLI fallback)
+        result = call_ollama_smart(model, prompt)
+        
+        # Check if result is an error
+        if result.startswith("Error:"):
+            return jsonify({"error": result}), 500
+
+        # Use specialized cleaning for comment removal (ensures all comments are gone)
+        cleaned_output = clean_removed_comments_output(result, code)
+        validated_output = validate_corrected_code(code, cleaned_output)
+        
+        if validated_output.startswith("Error:"):
+            return jsonify({"error": validated_output}), 500
+
+        return jsonify({
+            "original_code": code,
+            "cleaned_code": cleaned_output,
+            "model_used": model,
+            "language": language,
             "success": True
         })
 
@@ -460,33 +357,33 @@ Translation and Analysis:"""
 @app.route('/v1/chat/completions', methods=['POST'])
 def chat_completions():
     """OpenAI-compatible endpoint for VS Code Continue extension"""
-    print("\n" + "🎯" * 50)
-    print("📨 REQUEST RECEIVED at /v1/chat/completions")
-    print("🎯" * 50)
+    print("\n" + "=" * 50)
+    print("[REQUEST] REQUEST RECEIVED at /v1/chat/completions")
+    print("=" * 50)
     
     import sys
     sys.stdout.flush()
     
     try:
         # Log basic info
-        print(f"📧 Method: {request.method}")
-        print(f"🌐 Content-Type: {request.headers.get('Content-Type')}")
-        print(f"🌐 User-Agent: {request.headers.get('User-Agent')}")
+        print(f"[INFO] Method: {request.method}")
+        print(f"[INFO] Content-Type: {request.headers.get('Content-Type')}")
+        print(f"[INFO] User-Agent: {request.headers.get('User-Agent')}")
         
         # Get raw data first
         raw_data = request.get_data(as_text=True)
-        print(f"📦 Raw data received: {len(raw_data)} characters")
+        print(f"[DATA] Raw data received: {len(raw_data)} characters")
         
         # Try to parse JSON
         if raw_data:
-            print(f"📦 First 200 chars: {raw_data[:200]}")
+            print(f"[DATA] First 200 chars: {raw_data[:200]}")
             
             data = json.loads(raw_data)
-            print(f"📋 JSON parsed successfully")
+            print(f"[JSON] JSON parsed successfully")
             
             # Log messages
             if 'messages' in data:
-                print(f"💬 Found {len(data['messages'])} messages:")
+                print(f"[CHAT] Found {len(data['messages'])} messages:")
                 for i, msg in enumerate(data['messages']):
                     role = msg.get('role', 'unknown')
                     content = msg.get('content', '')[:100]  # First 100 chars
@@ -495,9 +392,9 @@ def chat_completions():
         sys.stdout.flush()
         
     except Exception as e:
-        print(f"❌ Error in logging: {str(e)}")
+        print(f"[ERROR] Error in logging: {str(e)}")
         import traceback
-        print(f"❌ Traceback: {traceback.format_exc()}")
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
         sys.stdout.flush()
     
     # Now continue with your existing function logic
@@ -508,8 +405,8 @@ def chat_completions():
         temperature = data.get('temperature', 0.1)
         stream = data.get('stream', False)
         
-        logging.info(f"🌊 Stream requested: {stream}")
-        print(f"🌊 Stream requested: {stream}")
+        logging.info(f"[STREAM] Stream requested: {stream}")
+        print(f"[STREAM] Stream requested: {stream}")
 
         if not messages:
             return jsonify({
@@ -526,16 +423,54 @@ def chat_completions():
                 user_message = message.get('content', '')
                 break
 
-        logging.info(f"🔍 Processing user message: {user_message[:100]}...")
-        print(f"🔍 Processing user message: {user_message[:100]}...")
+        logging.info(f"[PROCESS] Processing user message: {user_message[:100]}...")
+        logging.info(f"[PROCESS] Full user message: {user_message}")
         
-        # Check if this is an array commenting request
-        is_array_request = any(keyword in user_message.lower() for keyword in 
-                              ['array', 'comment', 'sequential', 'number', 'fix array', 'add comment', '/fix-array-comments'])
+        # Check if this is a remove-all-comments request (check this FIRST for priority)
+        is_remove_comments_request = any(keyword in user_message.lower() for keyword in 
+                                        ['@remove-all-comments', '/remove-all-comments', 
+                                         'remove-all-comments', 'remove all comment', 
+                                         'delete comment', 'strip comment', 'clean comment'])
         
-        if is_array_request:
-            logging.info("🎯 USING ARRAY COMMENTING LOGIC")
-            print("🎯 USING ARRAY COMMENTING LOGIC")
+        logging.info(f"[DETECT] Remove comments request: {is_remove_comments_request}")
+        
+        # Check if this is an array commenting request (but not if remove comments already matched)
+        is_array_request = False
+        if not is_remove_comments_request:
+            is_array_request = any(keyword in user_message.lower() for keyword in 
+                                  ['@fix-array-comments', '/fix-array-comments',
+                                   'fix-array-comments', 'add sequential comment', 
+                                   'sequential comment', 'number comment'])
+        
+        logging.info(f"[DETECT] Array request: {is_array_request}")
+        
+        if is_remove_comments_request:
+            logging.info("[REMOVE_COMMENTS] USING REMOVE COMMENTS LOGIC")
+            
+            # Extract code - try to get code block or variable assignment
+            code_to_fix = user_message
+            
+            # Try to extract code from markdown blocks first
+            code_block_match = re.search(r'```[\w]*\n(.*?)\n```', user_message, re.DOTALL)
+            if code_block_match:
+                code_to_fix = code_block_match.group(1).strip()
+                print(f"[OK] Extracted code from markdown block: {code_to_fix[:80]}...")
+            else:
+                # Try to extract variable assignment
+                full_code_match = re.search(
+                    r'((?:private\s+|public\s+|internal\s+)?(?:let|var|const)\s+\w+\s*=\s*\[.*?\])',
+                    user_message,
+                    re.DOTALL | re.IGNORECASE
+                )
+                if full_code_match:
+                    code_to_fix = full_code_match.group(1).strip()
+                    print(f"[OK] Extracted variable assignment: {code_to_fix[:80]}...")
+            
+            logging.info(f"[REMOVE_COMMENTS] Code to process: {code_to_fix}")
+            
+            prompt = format_prompt_for_remove_all_comments(code_to_fix, "swift")
+        elif is_array_request:
+            logging.info("[ARRAY] USING ARRAY COMMENTING LOGIC")
             
             # Extract code properly - handle Continue's format with file paths
             # Pattern 1: Try to extract full code with variable assignment
@@ -548,21 +483,21 @@ def chat_completions():
             
             if full_code_match:
                 code_to_fix = full_code_match.group(1).strip()
-                print(f"✅ Extracted full code with variable: {code_to_fix[:80]}...")
+                logging.info(f"[OK] Extracted full code with variable: {code_to_fix[:80]}...")
             else:
                 # Pattern 2: Fall back to just extracting the array
                 array_match = re.search(r'(\[.*\])', user_message, re.DOTALL)
                 if array_match:
                     code_to_fix = array_match.group(1).strip()
-                    print(f"✅ Extracted array only: {code_to_fix[:80]}...")
+                    print(f"[OK] Extracted array only: {code_to_fix[:80]}...")
                 else:
                     # Pattern 3: Use the whole message as last resort
                     code_to_fix = user_message
-                    print("⚠️ Using whole message as code")
+                    print("[WARNING] Using whole message as code")
             
             prompt = format_prompt_for_array_comments(code_to_fix, "swift")
         else:
-            print("💬 USING REGULAR CHAT LOGIC")
+            logging.info("[CHAT] USING REGULAR CHAT LOGIC")
             # Use normal conversation
             prompt = ""
             for message in messages:
@@ -578,10 +513,10 @@ def chat_completions():
                     prompt += f"{content}\n\n"
             prompt += "Assistant:"
 
-        print(f"📝 Sending prompt to Ollama...")
+        print(f"[SEND] Sending prompt to Ollama...")
         response_text = call_ollama_smart(model, prompt)
         
-        print(f"📨 Ollama response: {response_text[:200]}...")
+        print(f"[RESPONSE] Ollama response: {response_text[:200]}...")
         
         if response_text.startswith("Error:"):
             return jsonify({
@@ -591,9 +526,37 @@ def chat_completions():
                 }
             }), 500
         
+        # Clean the output for remove comments requests
+        if is_remove_comments_request and 'code_to_fix' in locals():
+            print("[CLEAN] Cleaning output (remove comments mode)...")
+            logging.info("[CLEAN] Cleaning output (remove comments mode)...")
+            
+            cleaned = clean_removed_comments_output(response_text, code_to_fix)
+            
+            if not cleaned.startswith("Error:"):
+                # Check if comments were actually removed
+                has_block_comments = bool(re.search(r'/\*.*?\*/', cleaned))
+                has_line_comments = bool(re.search(r'//.*$', cleaned, re.MULTILINE))
+                
+                if not has_block_comments and not has_line_comments:
+                    response_text = cleaned
+                    print(f"[OK] Comments successfully removed")
+                    logging.info(f"[OK] Comments successfully removed")
+                    print(f"[OUTPUT] First 300 chars: {cleaned[:300]}...")
+                    logging.info(f"[OUTPUT] Full cleaned code: {cleaned}")
+                else:
+                    print(f"[WARNING] Some comments may remain (block: {has_block_comments}, line: {has_line_comments})")
+                    logging.warning(f"[WARNING] Some comments may remain (block: {has_block_comments}, line: {has_line_comments})")
+                    response_text = cleaned  # Use it anyway
+                    print(f"[OUTPUT] Output: {cleaned[:300]}...")
+                    logging.info(f"[OUTPUT] Full output: {cleaned}")
+            else:
+                print(f"[WARNING] Cleaning failed: {cleaned}")
+                logging.warning(f"[WARNING] Cleaning failed: {cleaned}")
+        
         # Clean the output for array requests
-        if is_array_request and 'code_to_fix' in locals():
-            print("🧹 Cleaning model output...")
+        elif is_array_request and 'code_to_fix' in locals():
+            print("[CLEAN] Cleaning model output...")
             cleaned = clean_model_output(response_text, code_to_fix)
             
             if not cleaned.startswith("Error:"):
@@ -605,15 +568,15 @@ def chat_completions():
                     response_text = cleaned
                     # Count comments for logging
                     comment_count = len(re.findall(r'\/\*\s*(\d+)\s*\*\/', cleaned))
-                    print(f"✅ Cleaned output validated: {comment_count} comments added")
-                    print(f"📄 First 300 chars: {cleaned[:300]}...")
+                    print(f"[OK] Cleaned output validated: {comment_count} comments added")
+                    print(f"[OUTPUT] First 300 chars: {cleaned[:300]}...")
                 else:
-                    print(f"⚠️ Cleaned output invalid (comments: {has_comments}, array: {has_array})")
-                    print(f"📄 Output: {cleaned[:300]}...")
+                    print(f"[WARNING] Cleaned output invalid (comments: {has_comments}, array: {has_array})")
+                    print(f"[OUTPUT] Output: {cleaned[:300]}...")
                     # Fall back to original response with a warning message
-                    response_text = f"⚠️ Warning: Output validation failed. Raw response:\n\n{cleaned}"
+                    response_text = f"[WARNING] Warning: Output validation failed. Raw response:\n\n{cleaned}"
             else:
-                print(f"⚠️ Cleaning failed: {cleaned}")
+                print(f"[WARNING] Cleaning failed: {cleaned}")
 
         # Convert to OpenAI format
         openai_response = {
@@ -638,14 +601,14 @@ def chat_completions():
             }
         }
 
-        print("✅ Request completed successfully")
-        print(f"📤 Sending response to Continue (content length: {len(response_text)} chars)")
-        print(f"📤 Response preview: {response_text[:200]}...")
+        print("[OK] Request completed successfully")
+        print(f"[SEND] Sending response to Continue (content length: {len(response_text)} chars)")
+        print(f"[SEND] Response preview: {response_text[:200]}...")
         
         # Handle streaming vs non-streaming response
         if stream:
-            logging.info("🌊 Sending STREAMING response")
-            print("🌊 Sending STREAMING response")
+            logging.info("[STREAM] Sending STREAMING response")
+            print("[STREAM] Sending STREAMING response")
             def generate():
                 response_id = f"chatcmpl-{int(time.time())}"
                 
@@ -683,13 +646,13 @@ def chat_completions():
             
             return app.response_class(generate(), mimetype='text/event-stream')
         else:
-            print("📄 Sending NON-STREAMING response")
+            print("[OUTPUT] Sending NON-STREAMING response")
             return jsonify(openai_response)
 
     except Exception as e:
-        print(f"❌ Error in chat_completions: {str(e)}")
+        print(f"[ERROR] Error in chat_completions: {str(e)}")
         import traceback
-        print(f"❌ Traceback: {traceback.format_exc()}")
+        print(f"[ERROR] Traceback: {traceback.format_exc()}")
         return jsonify({
             "error": {
                 "message": str(e),
@@ -731,25 +694,134 @@ def list_models_openai():
             }
         }), 500
 
+
+@app.route('/api/adjust-liturgical-verses', methods=['POST'])
+def adjust_liturgical_verses():
+    """Adjust psalm verses to target count with liturgical awareness"""
+    try:
+        data = request.get_json()
+        code = data.get('code', '').strip()
+        target_count = data.get('target_verse_count', 18)
+        model = data.get('model', DEFAULT_MODEL)
+
+        if not code:
+            return jsonify({"error": "No code provided"}), 400
+
+        # Step 1: Parse verses from array
+        verses = parse_verses_from_array(code)
+        if not verses:
+            return jsonify({"error": "No verses found in array"}), 400
+
+        # Step 2: Analyze current structure
+        analysis = analyze_verse_structure_with_ai(verses)
+        
+        # Step 3: Adjust to target count
+        adjustment = adjust_verses_to_count(verses, analysis, target_count)
+        
+        # Step 4: Generate new array
+        new_verses = [v["content"] for v in adjustment["new_verses"]]
+        new_array = generate_swift_array(new_verses)
+
+        return jsonify({
+            "original_verse_count": len(verses),
+            "target_verse_count": target_count,
+            "new_verse_count": len(new_verses),
+            "original_code": code,
+            "adjusted_code": new_array,
+            "analysis": analysis,
+            "adjustment_explanation": adjustment.get("explanation", ""),
+            "success": True
+        })
+
+    except Exception as e:
+        return jsonify({"error": f"Liturgical processing error: {str(e)}"}), 500
+
+def generate_swift_array(verses):
+    """Generate Swift array code from verses"""
+    lines = ["private let text = ["]
+    
+    for i, verse in enumerate(verses):
+        # Handle multi-line verses by checking length
+        if len(verse) > 80:  # Long verse - split intelligently
+            parts = split_long_verse(verse)
+            lines.append(f'    /* {i+1} */ "{parts[0]}"')
+            for part in parts[1:]:
+                lines.append(f'            "{part}"')
+        else:
+            lines.append(f'    /* {i+1} */ "{verse}"')
+    
+    lines.append("]")
+    return "\n".join(lines)
+
+def split_long_verse(verse, max_length=80):
+    """Split long verses at natural break points"""
+    words = verse.split()
+    parts = []
+    current_part = ""
+    
+    for word in words:
+        if len(current_part) + len(word) + 1 > max_length and current_part:
+            parts.append(current_part.strip())
+            current_part = word
+        else:
+            current_part += " " + word if current_part else word
+    
+    if current_part:
+        parts.append(current_part.strip())
+    
+    return parts
+
+
+@app.route('/api/renumber-verses', methods=['POST'])
+def renumber_verses_endpoint():
+    """Renumber verse comments sequentially using AI"""
+    try:
+        data = request.get_json()
+
+        if not data or 'code' not in data:
+            return jsonify({"error": "No code provided"}), 400
+
+        code = data['code'].strip()
+        
+        if not code:
+            return jsonify({"error": "Empty code provided"}), 400
+        
+        model = data.get('model', DEFAULT_MODEL) 
+
+        # Call the renumber function from liturgical_processor
+        result = renumber_verses_with_ai(code, model=model)
+        
+        if result.startswith("Error:"):
+            return jsonify({"error": result}), 500
+
+        return jsonify({
+            "original_code": code,
+            "renumbered_code": result,
+            "success": True
+        })
+
+    except Exception as e:
+        return jsonify({"error": f"Server error: {str(e)}"}), 500
+
 if __name__ == '__main__':
-    print(f"🚀 Starting Enhanced Python coding server on port {PORT}")
-    print(f"📍 Default model: {DEFAULT_MODEL}")
-    print(f"📍 Ollama server: {OLLAMA_BASE_URL}")
-    print(f"📍 Health check: http://localhost:{PORT}/health")
-    print(f"📍 Fix array comments: http://localhost:{PORT}/api/fix-array-comments")
-    print(f"📍 Latin analysis: http://localhost:{PORT}/api/analyze-latin-word")
-    print(f"📍 OpenAI API: http://localhost:{PORT}/v1/chat/completions")
+    print(f"[START] Starting Enhanced Python coding server on port {PORT}")
+    print(f"[INFO] Default model: {DEFAULT_MODEL}")
+    print(f"[INFO] Ollama server: {OLLAMA_BASE_URL}")
+    print(f"[INFO] Health check: http://localhost:{PORT}/health")
+    print(f"[INFO] Fix array comments: http://localhost:{PORT}/api/fix-array-comments")
+    print(f"[INFO] Latin analysis: http://localhost:{PORT}/api/analyze-latin-word")
+    print(f"[INFO] OpenAI API: http://localhost:{PORT}/v1/chat/completions")
     
     # Initial Ollama check
     if check_ollama_availability():
         if IS_REMOTE:
-            print("✅ Connected to REMOTE Ollama server")
+            print("[OK] Connected to REMOTE Ollama server")
         else:
-            print("✅ Connected to LOCAL Ollama server")
+            print("[OK] Connected to LOCAL Ollama server")
     else:
         if IS_REMOTE:
-            print("❌ Cannot connect to REMOTE Ollama server")
+            print("[ERROR] Cannot connect to REMOTE Ollama server")
         else:
-            print("❌ Cannot connect to LOCAL Ollama server - will use CLI fallback")
+            print("[ERROR] Cannot connect to LOCAL Ollama server - will use CLI fallback")
     
     app.run(host='0.0.0.0', port=PORT, debug=True)
