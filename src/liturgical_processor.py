@@ -1,22 +1,60 @@
 import re
 import json
+import logging
 from ollama_client import call_ollama_smart
 from code_processor import clean_model_output
+logger = logging.getLogger(__name__)
 
 def renumber_verses_with_ai(code, model="mixtral:8x7b"):
     """Ultra-simple prompt that might actually work"""
     prompt = f"""
-Take this Swift array and make all the /* */ comments go 1, 2, 3, 4... sequentially.
 
-Keep everything else exactly the same.
+You are an expert Swift code formatter.
+Your task is to count **exactly how many strings** appear in the given Swift array and renumber them sequentially, and provide updated array
 
-Code:
+### RULES for what NOT to do
+
+1. Do not generate Swift function code to format the array.
+2. Do not merge or split string in the array.
+3. The Comment /* number */ before any string is misleading, don't use it to count
+4. The `.` or `;` inside the string is misleading, don't use it to count
+5. The blank line inside the array do not count 1
+
+### RULES for what to do
+1, For array in swift, the spliter is comma, so a string that ends with double quote and one comma followed should count 1
+2. The last string that ends with double quote but no comma followed should count 1.
+3. Provide or update with a comment /* number */ at the beginning of the string
+
+### EXAMPLE
+** INPUT **
+private let text = [
+  /* 1 */ "string a",
+   "string b",
+  /* 2 */ "string c",
+]
+
+
+** Expected OUTPUT **
+Total verses: 3
+```
+private let text = [
+  /* 1 */ "string a",
+  /* 2 */ "string b",
+  /* 3 */ "string c",
+]
+
+### Now, process this input    
 {code}
 
-Fixed code:
 """
     
     result = call_ollama_smart(model, prompt)
+
+    logger.info(f"[RENUMBER] Received response from Ollama")
+    logger.debug(f"[RENUMBER] Raw response length: {len(result)} chars")
+    logger.debug(f"[RENUMBER] Raw response first 200 chars: {result[:200]}")
+    logger.debug(f"[RENUMBER] Raw response last 200 chars: {result[-200:]}")
+
     return clean_model_output(result, code)
 
 

@@ -434,9 +434,19 @@ def chat_completions():
         
         logging.info(f"[DETECT] Remove comments request: {is_remove_comments_request}")
         
-        # Check if this is an array commenting request (but not if remove comments already matched)
-        is_array_request = False
+        # Check if this is a renumber verses request (check SECOND for priority)
+        is_renumber_verses_request = False
         if not is_remove_comments_request:
+            is_renumber_verses_request = any(keyword in user_message.lower() for keyword in 
+                                            ['@renumber-verses', '/renumber-verses',
+                                             'renumber-verses', 'renumber verses', 
+                                             'renumber verse', 'fix verse numbers'])
+        
+        logging.info(f"[DETECT] Renumber verses request: {is_renumber_verses_request}")
+        
+        # Check if this is an array commenting request (but not if remove comments or renumber already matched)
+        is_array_request = False
+        if not is_remove_comments_request and not is_renumber_verses_request:
             is_array_request = any(keyword in user_message.lower() for keyword in 
                                   ['@fix-array-comments', '/fix-array-comments',
                                    'fix-array-comments', 'add sequential comment', 
@@ -469,6 +479,36 @@ def chat_completions():
             logging.info(f"[REMOVE_COMMENTS] Code to process: {code_to_fix}")
             
             prompt = format_prompt_for_remove_all_comments(code_to_fix, "swift")
+        elif is_renumber_verses_request:
+            logging.info("[RENUMBER_VERSES] USING RENUMBER VERSES LOGIC")
+            
+            # Extract code - try to get code block or variable assignment
+            code_to_fix = user_message
+            
+            # Try to extract code from markdown blocks first
+            code_block_match = re.search(r'```[\w]*\n(.*?)\n```', user_message, re.DOTALL)
+            if code_block_match:
+                code_to_fix = code_block_match.group(1).strip()
+                logging.info(f"[OK] Extracted code from markdown block: {code_to_fix[:80]}...")
+            else:
+                # Try to extract variable assignment
+                full_code_match = re.search(
+                    r'((?:private\s+|public\s+|internal\s+)?(?:let|var|const)\s+\w+\s*=\s*\[.*?\])',
+                    user_message,
+                    re.DOTALL | re.IGNORECASE
+                )
+                if full_code_match:
+                    code_to_fix = full_code_match.group(1).strip()
+                    logging.info(f"[OK] Extracted variable assignment: {code_to_fix[:80]}...")
+            
+            logging.info(f"[RENUMBER_VERSES] Code to process: {code_to_fix[:200]}...")
+            
+            # Call renumber_verses_with_ai directly (it handles its own prompt internally)
+            response_text = renumber_verses_with_ai(code_to_fix, model=model)
+            
+            # Don't send to Ollama again - we already have the response
+            # Skip the normal prompt processing
+            prompt = None
         elif is_array_request:
             logging.info("[ARRAY] USING ARRAY COMMENTING LOGIC")
             
@@ -513,10 +553,14 @@ def chat_completions():
                     prompt += f"{content}\n\n"
             prompt += "Assistant:"
 
-        print(f"[SEND] Sending prompt to Ollama...")
-        response_text = call_ollama_smart(model, prompt)
-        
-        print(f"[RESPONSE] Ollama response: {response_text[:200]}...")
+        # Only call Ollama if we haven't already processed the request
+        if prompt is not None:
+            print(f"[SEND] Sending prompt to Ollama...")
+            response_text = call_ollama_smart(model, prompt)
+            print(f"[RESPONSE] Ollama response: {response_text[:200]}...")
+        else:
+            print(f"[SKIP] Skipping Ollama call - response already generated")
+            print(f"[RESPONSE] Pre-generated response: {response_text[:200]}...")
         
         if response_text.startswith("Error:"):
             return jsonify({
@@ -579,6 +623,9 @@ def chat_completions():
                 print(f"[WARNING] Cleaning failed: {cleaned}")
 
         # Convert to OpenAI format
+        prompt_tokens = len(prompt.split()) if prompt else 0
+        completion_tokens = len(response_text.split())
+        
         openai_response = {
             "id": f"chatcmpl-{int(time.time())}",
             "object": "chat.completion",
@@ -595,9 +642,9 @@ def chat_completions():
                 }
             ],
             "usage": {
-                "prompt_tokens": len(prompt.split()),
-                "completion_tokens": len(response_text.split()),
-                "total_tokens": len(prompt.split()) + len(response_text.split())
+                "prompt_tokens": prompt_tokens,
+                "completion_tokens": completion_tokens,
+                "total_tokens": prompt_tokens + completion_tokens
             }
         }
 
