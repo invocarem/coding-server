@@ -132,6 +132,10 @@ models:
     temperature: 0.1
     default: true
     contextLength: 4096
+  - name: mistral-cloud
+    provider: mistral
+    model: mistral-small-latest
+    apiKey: lAbgnma92xW1VqLxsuLCasdb0tB8mhSq
 customCommands:
   - name: "renumber-verses"
     prompt: "@renumber-verses"

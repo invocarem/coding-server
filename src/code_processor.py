@@ -26,7 +26,9 @@ RULES:
 - Remove both number comments /* N */ and text comments /* text */
 - Keep exact indentation and spacing
 - Preserve all code exactly (only remove comments)
+- Ensure consistent spacing and alignment after removing comments
 - OUTPUT: Wrap the code in Markdown code block, no explanations
+
 
 CODE TO PROCESS:
 {code}
