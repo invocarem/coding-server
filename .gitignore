@@ -46,3 +46,7 @@ Thumbs.db
 
 # Ollama models (optional)
 models/
+
+
+# test files
+psalm_request.json

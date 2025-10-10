@@ -1,4 +1,5 @@
 # src/ollama_client.py
+from tkinter import W
 import requests
 import subprocess
 import os
@@ -80,6 +81,8 @@ def call_ollama_http(model_name, prompt, timeout=45):
     """Call Ollama using HTTP API with remote support"""
     try:
         session = create_ollama_session()
+        logging.info(f"[INFO] Ollama model name: {model_name}")
+        logging.info(f"[INFO] prompt: {prompt}")
         
         response = session.post(
             f"{OLLAMA_BASE_URL}/api/generate",
@@ -90,7 +93,8 @@ def call_ollama_http(model_name, prompt, timeout=45):
                 "options": {
                     "temperature": 0.1,
                     "top_p": 0.9,
-                    "top_k": 40
+                    "top_k": 40,
+                    "num_predict": 4096
                 }
             },
             timeout=timeout

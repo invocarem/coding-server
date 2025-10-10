@@ -12,6 +12,8 @@ from urllib.parse import urlparse
 from datetime import datetime
 from dotenv import load_dotenv
 
+load_dotenv()
+
 logging.basicConfig(
     level=logging.DEBUG,
     format='%(asctime)s - %(levelname)s - %(message)s',
@@ -41,11 +43,7 @@ from liturgical_processor import (
 )
 
 from latin_morphology import analyze_latin_word
-
-load_dotenv()
 from ollama_client import call_ollama_smart, check_ollama_availability
-
-load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
@@ -53,7 +51,10 @@ CORS(app)
 # Configuration
 PORT = int(os.getenv('PORT', 5000))
 DEFAULT_MODEL = os.getenv('DEFAULT_MODEL', 'deepseek-coder:6.7b')
-
+logging.info(f"[STARTUP] DEFAULT_MODEL from env: {DEFAULT_MODEL}")
+logging.info(f"[STARTUP] PORT from env: {PORT}")
+print(f"Using model: {DEFAULT_MODEL}")
+print(f"Server port: {PORT}")
 
 def count_array_elements(code):
     """Count the number of array elements with comments"""
@@ -405,6 +406,44 @@ def chat_completions():
         temperature = data.get('temperature', 0.1)
         stream = data.get('stream', False)
         
+        # NEW: Check for optional 'code' field or 'code_file' for direct code operations
+        direct_code = data.get('code', None)
+        code_file = data.get('code_file', None)
+        
+        # If code_file is provided, read from file
+        if code_file:
+            try:
+                import os
+                # Support both absolute and relative paths
+                if not os.path.isabs(code_file):
+                    # Relative to current working directory
+                    code_file_path = os.path.join(os.getcwd(), code_file)
+                else:
+                    code_file_path = code_file
+                
+                with open(code_file_path, 'r', encoding='utf-8') as f:
+                    direct_code = f.read()
+                logging.info(f"[CODE_FILE] Loaded code from file: {code_file}")
+                logging.info(f"[CODE_FILE] Code preview: {direct_code[:100]}...")
+            except FileNotFoundError:
+                logging.error(f"[CODE_FILE] File not found: {code_file}")
+                return jsonify({
+                    "error": {
+                        "message": f"Code file not found: {code_file}",
+                        "type": "invalid_request_error"
+                    }
+                }), 400
+            except Exception as e:
+                logging.error(f"[CODE_FILE] Error reading file: {str(e)}")
+                return jsonify({
+                    "error": {
+                        "message": f"Error reading code file: {str(e)}",
+                        "type": "invalid_request_error"
+                    }
+                }), 400
+        elif direct_code:
+            logging.info(f"[DIRECT_CODE] Using direct 'code' field: {direct_code[:100]}...")
+        
         logging.info(f"[STREAM] Stream requested: {stream}")
         print(f"[STREAM] Stream requested: {stream}")
 
@@ -440,7 +479,7 @@ def chat_completions():
             is_renumber_verses_request = any(keyword in user_message.lower() for keyword in 
                                             ['@renumber-verses', '/renumber-verses',
                                              'renumber-verses', 'renumber verses', 
-                                             'renumber verse', 'fix verse numbers'])
+                                             'renumber verse', 'fix verse numbers', 'fix comment'])
         
         logging.info(f"[DETECT] Renumber verses request: {is_renumber_verses_request}")
         
@@ -457,24 +496,29 @@ def chat_completions():
         if is_remove_comments_request:
             logging.info("[REMOVE_COMMENTS] USING REMOVE COMMENTS LOGIC")
             
-            # Extract code - try to get code block or variable assignment
-            code_to_fix = user_message
-            
-            # Try to extract code from markdown blocks first
-            code_block_match = re.search(r'```[\w]*\n(.*?)\n```', user_message, re.DOTALL)
-            if code_block_match:
-                code_to_fix = code_block_match.group(1).strip()
-                print(f"[OK] Extracted code from markdown block: {code_to_fix[:80]}...")
+            # Use direct code if provided, otherwise extract from message
+            if direct_code:
+                code_to_fix = direct_code.strip()
+                logging.info(f"[REMOVE_COMMENTS] Using direct 'code' field")
             else:
-                # Try to extract variable assignment
-                full_code_match = re.search(
-                    r'((?:private\s+|public\s+|internal\s+)?(?:let|var|const)\s+\w+\s*=\s*\[.*?\])',
-                    user_message,
-                    re.DOTALL | re.IGNORECASE
-                )
-                if full_code_match:
-                    code_to_fix = full_code_match.group(1).strip()
-                    print(f"[OK] Extracted variable assignment: {code_to_fix[:80]}...")
+                # Extract code - try to get code block or variable assignment
+                code_to_fix = user_message
+                
+                # Try to extract code from markdown blocks first
+                code_block_match = re.search(r'```[\w]*\n(.*?)\n```', user_message, re.DOTALL)
+                if code_block_match:
+                    code_to_fix = code_block_match.group(1).strip()
+                    print(f"[OK] Extracted code from markdown block: {code_to_fix[:80]}...")
+                else:
+                    # Try to extract variable assignment
+                    full_code_match = re.search(
+                        r'((?:private\s+|public\s+|internal\s+)?(?:let|var|const)\s+\w+\s*=\s*\[.*?\])',
+                        user_message,
+                        re.DOTALL | re.IGNORECASE
+                    )
+                    if full_code_match:
+                        code_to_fix = full_code_match.group(1).strip()
+                        print(f"[OK] Extracted variable assignment: {code_to_fix[:80]}...")
             
             logging.info(f"[REMOVE_COMMENTS] Code to process: {code_to_fix}")
             
@@ -482,24 +526,29 @@ def chat_completions():
         elif is_renumber_verses_request:
             logging.info("[RENUMBER_VERSES] USING RENUMBER VERSES LOGIC")
             
-            # Extract code - try to get code block or variable assignment
-            code_to_fix = user_message
-            
-            # Try to extract code from markdown blocks first
-            code_block_match = re.search(r'```[\w]*\n(.*?)\n```', user_message, re.DOTALL)
-            if code_block_match:
-                code_to_fix = code_block_match.group(1).strip()
-                logging.info(f"[OK] Extracted code from markdown block: {code_to_fix[:80]}...")
+            # Use direct code if provided, otherwise extract from message
+            if direct_code:
+                code_to_fix = direct_code.strip()
+                logging.info(f"[RENUMBER_VERSES] Using direct 'code' field")
             else:
-                # Try to extract variable assignment
-                full_code_match = re.search(
-                    r'((?:private\s+|public\s+|internal\s+)?(?:let|var|const)\s+\w+\s*=\s*\[.*?\])',
-                    user_message,
-                    re.DOTALL | re.IGNORECASE
-                )
-                if full_code_match:
-                    code_to_fix = full_code_match.group(1).strip()
-                    logging.info(f"[OK] Extracted variable assignment: {code_to_fix[:80]}...")
+                # Extract code - try to get code block or variable assignment
+                code_to_fix = user_message
+                
+                # Try to extract code from markdown blocks first
+                code_block_match = re.search(r'```[\w]*\n(.*?)\n```', user_message, re.DOTALL)
+                if code_block_match:
+                    code_to_fix = code_block_match.group(1).strip()
+                    logging.info(f"[OK] Extracted code from markdown block: {code_to_fix[:80]}...")
+                else:
+                    # Try to extract variable assignment
+                    full_code_match = re.search(
+                        r'((?:private\s+|public\s+|internal\s+)?(?:let|var|const)\s+\w+\s*=\s*\[.*?\])',
+                        user_message,
+                        re.DOTALL | re.IGNORECASE
+                    )
+                    if full_code_match:
+                        code_to_fix = full_code_match.group(1).strip()
+                        logging.info(f"[OK] Extracted variable assignment: {code_to_fix[:80]}...")
             
             logging.info(f"[RENUMBER_VERSES] Code to process: {code_to_fix[:200]}...")
             
@@ -512,28 +561,33 @@ def chat_completions():
         elif is_array_request:
             logging.info("[ARRAY] USING ARRAY COMMENTING LOGIC")
             
-            # Extract code properly - handle Continue's format with file paths
-            # Pattern 1: Try to extract full code with variable assignment
-            # Matches: private let text = [...] or let text = [...] or var x = [...]
-            full_code_match = re.search(
-                r'((?:private\s+|public\s+|internal\s+)?(?:let|var|const)\s+\w+\s*=\s*\[.*\])',
-                user_message,
-                re.DOTALL | re.IGNORECASE
-            )
-            
-            if full_code_match:
-                code_to_fix = full_code_match.group(1).strip()
-                logging.info(f"[OK] Extracted full code with variable: {code_to_fix[:80]}...")
+            # Use direct code if provided, otherwise extract from message
+            if direct_code:
+                code_to_fix = direct_code.strip()
+                logging.info(f"[ARRAY] Using direct 'code' field")
             else:
-                # Pattern 2: Fall back to just extracting the array
-                array_match = re.search(r'(\[.*\])', user_message, re.DOTALL)
-                if array_match:
-                    code_to_fix = array_match.group(1).strip()
-                    print(f"[OK] Extracted array only: {code_to_fix[:80]}...")
+                # Extract code properly - handle Continue's format with file paths
+                # Pattern 1: Try to extract full code with variable assignment
+                # Matches: private let text = [...] or let text = [...] or var x = [...]
+                full_code_match = re.search(
+                    r'((?:private\s+|public\s+|internal\s+)?(?:let|var|const)\s+\w+\s*=\s*\[.*\])',
+                    user_message,
+                    re.DOTALL | re.IGNORECASE
+                )
+                
+                if full_code_match:
+                    code_to_fix = full_code_match.group(1).strip()
+                    logging.info(f"[OK] Extracted full code with variable: {code_to_fix[:80]}...")
                 else:
-                    # Pattern 3: Use the whole message as last resort
-                    code_to_fix = user_message
-                    print("[WARNING] Using whole message as code")
+                    # Pattern 2: Fall back to just extracting the array
+                    array_match = re.search(r'(\[.*\])', user_message, re.DOTALL)
+                    if array_match:
+                        code_to_fix = array_match.group(1).strip()
+                        print(f"[OK] Extracted array only: {code_to_fix[:80]}...")
+                    else:
+                        # Pattern 3: Use the whole message as last resort
+                        code_to_fix = user_message
+                        print("[WARNING] Using whole message as code")
             
             prompt = format_prompt_for_array_comments(code_to_fix, "swift")
         else:
@@ -824,11 +878,32 @@ def renumber_verses_endpoint():
     """Renumber verse comments sequentially using AI"""
     try:
         data = request.get_json()
+        
+        # Support both 'code' and 'code_file'
+        code = data.get('code', None)
+        code_file = data.get('code_file', None)
+        
+        if code_file:
+            # Read code from file
+            try:
+                import os
+                if not os.path.isabs(code_file):
+                    code_file_path = os.path.join(os.getcwd(), code_file)
+                else:
+                    code_file_path = code_file
+                
+                with open(code_file_path, 'r', encoding='utf-8') as f:
+                    code = f.read()
+                logging.info(f"[RENUMBER_VERSES] Loaded code from file: {code_file}")
+            except FileNotFoundError:
+                return jsonify({"error": f"Code file not found: {code_file}"}), 400
+            except Exception as e:
+                return jsonify({"error": f"Error reading code file: {str(e)}"}), 400
+        
+        if not code:
+            return jsonify({"error": "No code provided (use 'code' or 'code_file' parameter)"}), 400
 
-        if not data or 'code' not in data:
-            return jsonify({"error": "No code provided"}), 400
-
-        code = data['code'].strip()
+        code = code.strip()
         
         if not code:
             return jsonify({"error": "Empty code provided"}), 400

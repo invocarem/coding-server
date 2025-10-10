@@ -1,0 +1,10 @@
+{
+  "model": "mixtral:8x7b",
+  "messages": [
+    {
+      "role": "user",
+      "content": "renumber verses"
+    }
+  ],
+  "code_file": "psalm68.swift"
+}

@@ -104,51 +104,72 @@ $ curl -X POST http://127.0.0.1:5000/v1/chat/completions   -H "Content-Type: app
 
 ```bash
 $ curl -X POST http://127.0.0.1:5000/v1/chat/completions   -H "Content-Type: application/json"   -d '{
-    "model": "deepseek-coder:6.7b",
+    "model": "mixtral:8x7b",
     "messages": [
       {"role": "user", "content": "@renumber-verses private let text = [\n  /* 1 */ \"First verse\",\n  \"continuation\",\n  /* 2 */ \"Second verse\"\n]"}
     ]
-  }'
+  }' -o output.log
 ```
 
-# my config setting of vscode
+# VS Code Continue Extension Setup
 
-```
+This server works seamlessly with VS Code's Continue extension! **No changes needed** - Continue automatically sends code in the `messages.content` field, which the server handles perfectly.
+
+## Quick Setup
+
+Add this to your Continue configuration (`.continue/config.json`):
+
+```yaml
 name: Local Agent
 version: 1.0.0
 schema: v1
 models:
   - name: local-coding-assistant
     provider: "openai"
-    model: "deepseek-coder:6.7b"
+    model: "mixtral:8x7b" # or "deepseek-coder:6.7b"
     apiBase: "http://127.0.0.1:5000/v1"
     apiKey: "not-needed"
     temperature: 0.1
     default: true
-    contextLength: 2048
+    contextLength: 4096
 customCommands:
+  - name: "renumber-verses"
+    prompt: "@renumber-verses"
+    description: "Renumber verse comments sequentially"
   - name: "fix-array-comments"
-    prompt: "Add sequential /* number */ comments to every element in the selected array. Number from 1 to the total count. Maintain original formatting."
+    prompt: "@fix-array-comments"
     description: "Fix array comments with sequential numbering"
   - name: "remove-all-comments"
-    prompt: "Remove all /* ... */ comments from the selected code. Keep the code structure exactly the same."
+    prompt: "@remove-all-comments"
     description: "Remove all comments from code"
-  - name: "renumber-verses"
-    prompt: "@renumber-verses Count the exact number of strings in this array and renumber them sequentially from 1."
-    description: "Renumber verse comments sequentially"
-  - name: "analyze-latin"
-    prompt: "Analyze Latin text for lemmas and grammar"
-    description: "Latin linguistic analysis"
 
 contextProviders:
   - name: file
+  - name: code
   - name: terminal
   - name: diff
-  - name: problems
-
-experimental:
-  debug: true
 ```
+
+## Usage in VS Code
+
+1. **Select your Swift array code**
+2. **Open Continue** (`Cmd+L` or `Ctrl+L`)
+3. **Type**: `/renumber-verses` or `/fix-array-comments` or `/remove-all-comments`
+4. **Press Enter**
+
+📖 **See [CONTINUE_SETUP.md](CONTINUE_SETUP.md) for detailed usage guide, examples, and troubleshooting.**
+
+## How It Works
+
+Continue sends your selected code in the standard OpenAI format:
+
+```json
+{
+  "messages": [{ "role": "user", "content": "@renumber-verses <your-code>" }]
+}
+```
+
+The server automatically detects the keyword and extracts your code - no special configuration needed!
 
 a test json:
 
@@ -160,8 +181,55 @@ a test json:
 }
 
 
-# usage:
+# Usage
+
+## 🎉 New! File-Based Code Loading (No JSON Escaping!)
+
+The easiest way - reference plain Swift files directly:
+
+**Step 1:** Create `psalm68.swift` (plain Swift, no escaping):
+```swift
+private let text = [
+    /* 1 */ "Benedictus Dominus...",
+    /* 14 */ "Regna terrae...",
+    /* 17 */ "Mirabilis Deus..."
+]
+```
+
+**Step 2:** Create `request.json`:
+```json
+{
+  "model": "mixtral:8x7b",
+  "messages": [{"role": "user", "content": "renumber verses"}],
+  "code_file": "psalm68.swift"
+}
+```
+
+**Step 3:** Run:
+```bash
+curl -X POST http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d @request.json \
+  -o output.log
+```
+
+✅ **No `\n` or `\"` escaping needed!**
+
+📖 **See [FILE_BASED_USAGE.md](FILE_BASED_USAGE.md) for complete guide.**
+
+## Traditional Usage (Still Works)
 
 ```bash
-curl -X POST http://localhost:5000/api/renumber-verses   -H "Content-Type: application/json"   -d @psalm_request.json -o output.json
+curl -X POST http://localhost:5000/api/renumber-verses \
+  -H "Content-Type: application/json" \
+  -d @psalm_request.json \
+  -o output.log
+```
+
+```bash
+curl -X POST http://localhost:5000/v1/chat/completions \
+  -H "Content-Type: application/json" \
+  -d @psalm_request.json \
+  -o output.log
+```
 ````

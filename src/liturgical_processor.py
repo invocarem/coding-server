@@ -12,30 +12,30 @@ def renumber_verses_with_ai(code, model="mixtral:8x7b"):
 You are an expert Swift code formatter.
 Your task is to count **exactly how many strings** appear in the given Swift array and renumber them sequentially, and provide updated array
 
-### RULES for what NOT to do
-
+### RULES
 1. Do not generate Swift function code to format the array.
 2. Do not merge or split string in the array.
 3. The Comment /* number */ before any string is misleading, don't use it to count
 4. The `.` or `;` inside the string is misleading, don't use it to count
 5. The blank line inside the array do not count 1
-
-### RULES for what to do
-1, For array in swift, the spliter is comma, so a string that ends with double quote and one comma followed should count 1
-2. The last string that ends with double quote but no comma followed should count 1.
-3. Provide or update with a comment /* number */ at the beginning of the string
+6, For array in swift, the spliter is comma, so a string that ends with double quote and one comma followed should c
+ount 1
+7. The last string (that ends with double quote `"` which followed with `]` with no comma) should count 1.
+8. In the output, every string should start with a /* number */ comment
+9. Every 5 strings, insert a blank line to make it easier to read.
+10. No explanations, notes, but markdown code block only.
 
 ### EXAMPLE
 ** INPUT **
 private let text = [
   /* 1 */ "string a",
    "string b",
-  /* 2 */ "string c",
+  /* 2 */ "string c"
+
 ]
 
 
 ** Expected OUTPUT **
-Total verses: 3
 ```
 private let text = [
   /* 1 */ "string a",
@@ -47,7 +47,7 @@ private let text = [
 {code}
 
 """
-    
+    logger.info(f"[RENUMBER] ollama {model}")
     result = call_ollama_smart(model, prompt)
 
     logger.info(f"[RENUMBER] Received response from Ollama")
